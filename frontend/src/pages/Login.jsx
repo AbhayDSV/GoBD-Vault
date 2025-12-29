@@ -1,21 +1,49 @@
-import React, { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Lock, Mail, KeyRound, User, AlertCircle } from 'lucide-react';
+import { Lock, Mail, KeyRound, User, AlertCircle, Check } from 'lucide-react';
 import './Login.css';
 
 const Login = () => {
     const [isLogin, setIsLogin] = useState(true);
+
+    // Registration steps: 1 = email, 2 = verify code, 3 = password
+    const [registrationStep, setRegistrationStep] = useState(1);
+
     const [formData, setFormData] = useState({
         name: '',
         email: '',
-        password: ''
+        password: '',
+        confirmPassword: '',
+        code: ['', '', '', '', '', '']
     });
+
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
+    const [timer, setTimer] = useState(0);
+    const [canResend, setCanResend] = useState(false);
 
     const { login, register } = useAuth();
     const navigate = useNavigate();
+
+    // Refs for OTP inputs
+    const otpRefs = useRef([]);
+
+    // Timer countdown
+    useEffect(() => {
+        if (timer > 0) {
+            const interval = setInterval(() => {
+                setTimer(prev => {
+                    if (prev <= 1) {
+                        setCanResend(true);
+                        return 0;
+                    }
+                    return prev - 1;
+                });
+            }, 1000);
+            return () => clearInterval(interval);
+        }
+    }, [timer]);
 
     const handleChange = (e) => {
         setFormData({
@@ -25,18 +53,143 @@ const Login = () => {
         setError('');
     };
 
-    const handleSubmit = async (e) => {
+    const handleOtpChange = (index, value) => {
+        if (!/^\d*$/.test(value)) return; // Only digits
+
+        const newCode = [...formData.code];
+        newCode[index] = value.slice(-1); // Only last digit
+        setFormData({ ...formData, code: newCode });
+        setError('');
+
+        // Auto-focus next input
+        if (value && index < 5) {
+            otpRefs.current[index + 1]?.focus();
+        }
+    };
+
+    const handleOtpKeyDown = (index, e) => {
+        if (e.key === 'Backspace' && !formData.code[index] && index > 0) {
+            otpRefs.current[index - 1]?.focus();
+        }
+    };
+
+    const handleSendVerification = async (e) => {
         e.preventDefault();
         setError('');
         setLoading(true);
 
         try {
-            let result;
-            if (isLogin) {
-                result = await login(formData.email, formData.password);
-            } else {
-                result = await register(formData.name, formData.email, formData.password);
+            const response = await fetch('/api/auth/send-verification', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: formData.name,
+                    email: formData.email
+                })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to send verification code');
             }
+
+            setRegistrationStep(2);
+            setTimer(600); // 10 minutes
+            setCanResend(false);
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleVerifyCode = async (e) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+
+        const code = formData.code.join('');
+        if (code.length !== 6) {
+            setError('Please enter all 6 digits');
+            setLoading(false);
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/auth/verify-code', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    email: formData.email,
+                    code
+                })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Invalid verification code');
+            }
+
+            setRegistrationStep(3);
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleResendCode = async () => {
+        if (!canResend) return;
+
+        setError('');
+        setLoading(true);
+        setFormData({ ...formData, code: ['', '', '', '', '', ''] });
+
+        try {
+            const response = await fetch('/api/auth/send-verification', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: formData.name,
+                    email: formData.email
+                })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to resend code');
+            }
+
+            setTimer(600);
+            setCanResend(false);
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleRegister = async (e) => {
+        e.preventDefault();
+        setError('');
+
+        if (formData.password !== formData.confirmPassword) {
+            setError('Passwords do not match');
+            return;
+        }
+
+        if (formData.password.length < 6) {
+            setError('Password must be at least 6 characters');
+            return;
+        }
+
+        setLoading(true);
+
+        try {
+            const result = await register(formData.name, formData.email, formData.password);
 
             if (result.success) {
                 navigate('/');
@@ -44,10 +197,50 @@ const Login = () => {
                 setError(result.error);
             }
         } catch (err) {
-            setError('An unexpected error occurred');
+            setError('Registration failed');
         } finally {
             setLoading(false);
         }
+    };
+
+    const handleLogin = async (e) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+
+        try {
+            const result = await login(formData.email, formData.password);
+
+            if (result.success) {
+                navigate('/');
+            } else {
+                setError(result.error);
+            }
+        } catch (err) {
+            setError('Login failed');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const formatTime = (seconds) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+    };
+
+    const resetRegistration = () => {
+        setRegistrationStep(1);
+        setFormData({
+            name: '',
+            email: '',
+            password: '',
+            confirmPassword: '',
+            code: ['', '', '', '', '', '']
+        });
+        setError('');
+        setTimer(0);
+        setCanResend(false);
     };
 
     return (
@@ -84,7 +277,7 @@ const Login = () => {
                 </div>
             </div>
 
-            {/* Right Panel - Login Form */}
+            {/* Right Panel - Login/Register Form */}
             <div className="login-container">
                 <div className="login-card">
                     <div className="login-header">
@@ -94,12 +287,35 @@ const Login = () => {
                         </p>
                     </div>
 
+                    {!isLogin && registrationStep > 1 && (
+                        <div className="step-indicator">
+                            <div className={`step ${registrationStep >= 1 ? 'active' : ''} ${registrationStep > 1 ? 'completed' : ''}`}>
+                                <div className="step-circle">
+                                    {registrationStep > 1 ? <Check size={16} /> : '1'}
+                                </div>
+                                <span>Email</span>
+                            </div>
+                            <div className="step-line"></div>
+                            <div className={`step ${registrationStep >= 2 ? 'active' : ''} ${registrationStep > 2 ? 'completed' : ''}`}>
+                                <div className="step-circle">
+                                    {registrationStep > 2 ? <Check size={16} /> : '2'}
+                                </div>
+                                <span>Verify</span>
+                            </div>
+                            <div className="step-line"></div>
+                            <div className={`step ${registrationStep >= 3 ? 'active' : ''}`}>
+                                <div className="step-circle">3</div>
+                                <span>Password</span>
+                            </div>
+                        </div>
+                    )}
+
                     <div className="login-tabs">
                         <button
                             className={`tab ${isLogin ? 'active' : ''}`}
                             onClick={() => {
                                 setIsLogin(true);
-                                setError('');
+                                resetRegistration();
                             }}
                         >
                             Login
@@ -108,22 +324,64 @@ const Login = () => {
                             className={`tab ${!isLogin ? 'active' : ''}`}
                             onClick={() => {
                                 setIsLogin(false);
-                                setError('');
+                                resetRegistration();
                             }}
                         >
                             Register
                         </button>
                     </div>
 
-                    <form onSubmit={handleSubmit} className="login-form">
-                        {error && (
-                            <div className="error-message">
-                                <AlertCircle size={18} />
-                                {error}
-                            </div>
-                        )}
+                    {error && (
+                        <div className="error-message">
+                            <AlertCircle size={18} />
+                            {error}
+                        </div>
+                    )}
 
-                        {!isLogin && (
+                    {/* Login Form */}
+                    {isLogin && (
+                        <form onSubmit={handleLogin} className="login-form">
+                            <div className="form-group">
+                                <label className="label">
+                                    <Mail size={16} />
+                                    Email Address
+                                </label>
+                                <input
+                                    type="email"
+                                    name="email"
+                                    className="input"
+                                    placeholder="Enter your email"
+                                    value={formData.email}
+                                    onChange={handleChange}
+                                    required
+                                />
+                            </div>
+
+                            <div className="form-group">
+                                <label className="label">
+                                    <KeyRound size={16} />
+                                    Password
+                                </label>
+                                <input
+                                    type="password"
+                                    name="password"
+                                    className="input"
+                                    placeholder="Enter your password"
+                                    value={formData.password}
+                                    onChange={handleChange}
+                                    required
+                                />
+                            </div>
+
+                            <button type="submit" className="submit-button" disabled={loading}>
+                                {loading ? <div className="spinner" style={{ width: '20px', height: '20px' }}></div> : 'Sign In'}
+                            </button>
+                        </form>
+                    )}
+
+                    {/* Registration Step 1: Name & Email */}
+                    {!isLogin && registrationStep === 1 && (
+                        <form onSubmit={handleSendVerification} className="login-form">
                             <div className="form-group">
                                 <label className="label">
                                     <User size={16} />
@@ -136,56 +394,129 @@ const Login = () => {
                                     placeholder="Enter your full name"
                                     value={formData.name}
                                     onChange={handleChange}
-                                    required={!isLogin}
+                                    required
                                 />
                             </div>
-                        )}
 
-                        <div className="form-group">
-                            <label className="label">
-                                <Mail size={16} />
-                                Email Address
-                            </label>
-                            <input
-                                type="email"
-                                name="email"
-                                className="input"
-                                placeholder="Enter your email"
-                                value={formData.email}
-                                onChange={handleChange}
-                                required
-                            />
-                        </div>
+                            <div className="form-group">
+                                <label className="label">
+                                    <Mail size={16} />
+                                    Email Address
+                                </label>
+                                <input
+                                    type="email"
+                                    name="email"
+                                    className="input"
+                                    placeholder="Enter your email"
+                                    value={formData.email}
+                                    onChange={handleChange}
+                                    required
+                                />
+                            </div>
 
-                        <div className="form-group">
-                            <label className="label">
-                                <KeyRound size={16} />
-                                Password
-                            </label>
-                            <input
-                                type="password"
-                                name="password"
-                                className="input"
-                                placeholder="Enter your password"
-                                value={formData.password}
-                                onChange={handleChange}
-                                required
-                                minLength={6}
-                            />
-                        </div>
+                            <button type="submit" className="submit-button" disabled={loading}>
+                                {loading ? <div className="spinner" style={{ width: '20px', height: '20px' }}></div> : 'Send Verification Code'}
+                            </button>
+                        </form>
+                    )}
 
-                        <button
-                            type="submit"
-                            className="submit-button"
-                            disabled={loading}
-                        >
-                            {loading ? (
-                                <div className="spinner" style={{ width: '20px', height: '20px' }}></div>
-                            ) : (
-                                isLogin ? 'Sign In' : 'Create Account'
-                            )}
-                        </button>
-                    </form>
+                    {/* Registration Step 2: Verify Code */}
+                    {!isLogin && registrationStep === 2 && (
+                        <form onSubmit={handleVerifyCode} className="login-form">
+                            <div className="form-group">
+                                <label className="label">
+                                    <Mail size={16} />
+                                    Verification Code
+                                </label>
+                                <p className="input-hint">Enter the 6-digit code sent to {formData.email}</p>
+
+                                <div className="otp-container">
+                                    {formData.code.map((digit, index) => (
+                                        <input
+                                            key={index}
+                                            ref={el => otpRefs.current[index] = el}
+                                            type="text"
+                                            inputMode="numeric"
+                                            maxLength={1}
+                                            className="otp-input"
+                                            value={digit}
+                                            onChange={(e) => handleOtpChange(index, e.target.value)}
+                                            onKeyDown={(e) => handleOtpKeyDown(index, e)}
+                                            autoFocus={index === 0}
+                                        />
+                                    ))}
+                                </div>
+
+                                {timer > 0 && (
+                                    <p className="timer-text">Code expires in {formatTime(timer)}</p>
+                                )}
+                            </div>
+
+                            <button type="submit" className="submit-button" disabled={loading}>
+                                {loading ? <div className="spinner" style={{ width: '20px', height: '20px' }}></div> : 'Verify Code'}
+                            </button>
+
+                            <button
+                                type="button"
+                                className="resend-button"
+                                onClick={handleResendCode}
+                                disabled={!canResend || loading}
+                            >
+                                {canResend ? 'Resend Code' : `Resend in ${formatTime(timer)}`}
+                            </button>
+
+                            <button
+                                type="button"
+                                className="back-button"
+                                onClick={() => setRegistrationStep(1)}
+                            >
+                                ← Change Email
+                            </button>
+                        </form>
+                    )}
+
+                    {/* Registration Step 3: Create Password */}
+                    {!isLogin && registrationStep === 3 && (
+                        <form onSubmit={handleRegister} className="login-form">
+                            <div className="form-group">
+                                <label className="label">
+                                    <KeyRound size={16} />
+                                    Password
+                                </label>
+                                <input
+                                    type="password"
+                                    name="password"
+                                    className="input"
+                                    placeholder="Create a password (min 6 characters)"
+                                    value={formData.password}
+                                    onChange={handleChange}
+                                    required
+                                    minLength={6}
+                                />
+                            </div>
+
+                            <div className="form-group">
+                                <label className="label">
+                                    <KeyRound size={16} />
+                                    Confirm Password
+                                </label>
+                                <input
+                                    type="password"
+                                    name="confirmPassword"
+                                    className="input"
+                                    placeholder="Confirm your password"
+                                    value={formData.confirmPassword}
+                                    onChange={handleChange}
+                                    required
+                                    minLength={6}
+                                />
+                            </div>
+
+                            <button type="submit" className="submit-button" disabled={loading}>
+                                {loading ? <div className="spinner" style={{ width: '20px', height: '20px' }}></div> : 'Create Account'}
+                            </button>
+                        </form>
+                    )}
 
                     <div className="login-footer">
                         <div className="compliance-badge">
